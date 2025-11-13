@@ -1,0 +1,393 @@
+using Octonica.ClickHouseClient;
+using Microsoft.OpenApi.Models;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using Microsoft.AspNetCore.Authorization;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// JWT Configuration
+var jwtSecret = builder.Configuration["Jwt:Secret"] ?? "your-super-secret-key-min-32-chars-long-please-change-this";
+var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "SecurityAlertSystem";
+var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "SecurityAlertSystemUsers";
+
+// Add services
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000")
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .AllowCredentials();
+    });
+});
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+            ValidateIssuer = true,
+            ValidIssuer = jwtIssuer,
+            ValidateAudience = true,
+            ValidAudience = jwtAudience,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.Zero
+        };
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<JwtService>();
+builder.Services.AddSingleton<UserService>();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo 
+    { 
+        Title = "Better than Cisco - Security Monitoring API",
+        Version = "Alpha v0.1",
+        Description = "Real-time security alert monitoring and management"
+    });
+    
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header using the Bearer scheme",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
+    });
+    
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+
+builder.Services.AddHostedService<AlertMonitorService>();
+
+var app = builder.Build();
+
+// Initialize users table
+var userService = app.Services.GetRequiredService<UserService>();
+await userService.InitializeUsersTable();
+
+app.UseCors("AllowAll");
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "Better than Cisco API v1");
+    c.RoutePrefix = "swagger";
+});
+
+app.MapHub<AlertsHub>("/alertsHub");
+
+const string connStr = "Host=clickhouse;Port=9000;Database=observability;User=vector;Password=vector;";
+
+// Auth endpoints
+app.MapPost("/api/auth/login", async (LoginRequest request, JwtService jwtService, UserService userService) =>
+{
+    if (await userService.ValidatePassword(request.Username, request.Password))
+    {
+        var user = await userService.GetUserByUsername(request.Username);
+        if (user != null)
+        {
+            var token = jwtService.GenerateToken(user);
+            await userService.UpdateLastLogin(user.Id);
+            
+            return Results.Ok(new LoginResponse
+            {
+                Token = token,
+                Username = user.Username,
+                Email = user.Email,
+                Role = user.Role,
+                ExpiresAt = DateTime.UtcNow.AddHours(24)
+            });
+        }
+    }
+    return Results.Unauthorized();
+})
+.WithName("Login")
+.WithTags("Authentication");
+
+app.MapPost("/api/auth/register", async (RegisterRequest request, UserService userService) =>
+{
+    var existing = await userService.GetUserByUsername(request.Username);
+    if (existing != null)
+    {
+        return Results.BadRequest(new { message = "Username already exists" });
+    }
+
+    var user = new User
+    {
+        Username = request.Username,
+        Email = request.Email,
+        PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
+        Role = "User",
+        CreatedAt = DateTime.UtcNow,
+        IsActive = true
+    };
+
+    await userService.CreateUser(user);
+    return Results.Ok(new { message = "User created successfully" });
+})
+.WithName("Register")
+.WithTags("Authentication");
+
+// Dashboard stats
+app.MapGet("/api/stats", [Authorize] async () =>
+{
+    await using var conn = new ClickHouseConnection(connStr);
+    await conn.OpenAsync();
+
+    var stats = new SystemStats();
+
+    // Total alerts
+    var sql = "SELECT count(*) FROM observability.alerts";
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = sql;
+    stats.TotalAlerts = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+
+    // Alerts last 24h
+    cmd.CommandText = "SELECT count(*) FROM observability.alerts WHERE ingested_at >= now() - INTERVAL 24 HOUR";
+    stats.AlertsLast24h = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+
+    // Alerts last hour
+    cmd.CommandText = "SELECT count(*) FROM observability.alerts WHERE ingested_at >= now() - INTERVAL 1 HOUR";
+    stats.AlertsLastHour = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+
+    // Alerts over time (last 24 hours, hourly)
+    cmd.CommandText = @"
+        SELECT 
+            toStartOfHour(ingested_at) as hour,
+            count(*) as count
+        FROM observability.alerts
+        WHERE ingested_at >= now() - INTERVAL 24 HOUR
+        GROUP BY hour
+        ORDER BY hour";
+    
+    await using var reader = await cmd.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        stats.AlertsOverTime.Add(new TimeSeriesPoint
+        {
+            Time = reader.GetDateTime(0),
+            Count = reader.GetInt64(1)
+        });
+    }
+
+    return Results.Ok(stats);
+})
+.WithName("GetStats")
+.WithTags("Dashboard")
+.RequireAuthorization();
+
+// Get alerts with pagination and filtering
+app.MapGet("/api/alerts", [Authorize] async (int? limit, DateTime? since, string? severity) =>
+{
+    await using var conn = new ClickHouseConnection(connStr);
+    await conn.OpenAsync();
+    
+    var sql = "SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at FROM observability.alerts WHERE 1=1";
+    
+    if (since.HasValue)
+        sql += " AND ts >= @since";
+    if (!string.IsNullOrEmpty(severity))
+        sql += " AND level = @severity";
+        
+    sql += " ORDER BY ts DESC LIMIT @limit";
+
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = sql;
+    cmd.Parameters.AddWithValue("limit", limit ?? 100);
+    if (since.HasValue)
+        cmd.Parameters.AddWithValue("since", since.Value);
+    if (!string.IsNullOrEmpty(severity))
+        cmd.Parameters.AddWithValue("severity", severity);
+
+    await using var reader = await cmd.ExecuteReaderAsync();
+    var results = new List<object>();
+    while (await reader.ReadAsync())
+    {
+        results.Add(new
+        {
+            id = reader.GetValue(0),
+            ts = reader.GetDateTime(1),
+            level = reader.GetString(2),
+            message = reader.GetString(3),
+            payload = reader.GetString(4),
+            source_file = reader.GetString(5),
+            source_offset = reader.GetUInt64(6),
+            ingested_at = reader.GetDateTime(7)
+        });
+    }
+    return Results.Ok(results);
+})
+.WithName("GetAlerts")
+.WithTags("Alerts")
+.RequireAuthorization();
+
+// Search alerts
+app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request) =>
+{
+    await using var conn = new ClickHouseConnection(connStr);
+    await conn.OpenAsync();
+
+    var conditions = new List<string> { "1=1" };
+    var sql = "SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at FROM observability.alerts WHERE ";
+
+    if (!string.IsNullOrEmpty(request.Query))
+        conditions.Add("(message ILIKE @query OR payload ILIKE @query)");
+    if (request.StartDate.HasValue)
+        conditions.Add("ts >= @startDate");
+    if (request.EndDate.HasValue)
+        conditions.Add("ts <= @endDate");
+    if (!string.IsNullOrEmpty(request.Severity))
+        conditions.Add("level = @severity");
+    if (!string.IsNullOrEmpty(request.SourceIp))
+        conditions.Add("payload ILIKE @sourceIp");
+    if (!string.IsNullOrEmpty(request.DestIp))
+        conditions.Add("payload ILIKE @destIp");
+
+    sql += string.Join(" AND ", conditions);
+    sql += " ORDER BY ts DESC LIMIT @limit OFFSET @offset";
+
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = sql;
+    cmd.Parameters.AddWithValue("limit", request.PageSize);
+    cmd.Parameters.AddWithValue("offset", (request.Page - 1) * request.PageSize);
+    
+    if (!string.IsNullOrEmpty(request.Query))
+        cmd.Parameters.AddWithValue("query", $"%{request.Query}%");
+    if (request.StartDate.HasValue)
+        cmd.Parameters.AddWithValue("startDate", request.StartDate.Value);
+    if (request.EndDate.HasValue)
+        cmd.Parameters.AddWithValue("endDate", request.EndDate.Value);
+    if (!string.IsNullOrEmpty(request.Severity))
+        cmd.Parameters.AddWithValue("severity", request.Severity);
+    if (!string.IsNullOrEmpty(request.SourceIp))
+        cmd.Parameters.AddWithValue("sourceIp", $"%{request.SourceIp}%");
+    if (!string.IsNullOrEmpty(request.DestIp))
+        cmd.Parameters.AddWithValue("destIp", $"%{request.DestIp}%");
+
+    await using var reader = await cmd.ExecuteReaderAsync();
+    var results = new List<object>();
+    while (await reader.ReadAsync())
+    {
+        results.Add(new
+        {
+            id = reader.GetValue(0),
+            ts = reader.GetDateTime(1),
+            level = reader.GetString(2),
+            message = reader.GetString(3),
+            payload = reader.GetString(4),
+            source_file = reader.GetString(5),
+            source_offset = reader.GetUInt64(6),
+            ingested_at = reader.GetDateTime(7)
+        });
+    }
+
+    // Get total count
+    var countSql = "SELECT count(*) FROM observability.alerts WHERE " + string.Join(" AND ", conditions);
+    cmd.CommandText = countSql;
+    var total = Convert.ToInt64(await cmd.ExecuteScalarAsync());
+
+    return Results.Ok(new { data = results, total, page = request.Page, pageSize = request.PageSize });
+})
+.WithName("SearchAlerts")
+.WithTags("Alerts")
+.RequireAuthorization();
+
+// Delete alerts
+app.MapPost("/api/alerts/delete", [Authorize(Roles = "Admin,Analyst")] async (BulkDeleteRequest request) =>
+{
+    await using var conn = new ClickHouseConnection(connStr);
+    await conn.OpenAsync();
+
+    if (request.DeleteAll)
+    {
+        var sql = "ALTER TABLE observability.alerts DELETE WHERE 1=1";
+        if (request.OlderThan.HasValue)
+            sql += " AND ts < @olderThan";
+            
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        if (request.OlderThan.HasValue)
+            cmd.Parameters.AddWithValue("olderThan", request.OlderThan.Value);
+        await cmd.ExecuteNonQueryAsync();
+    }
+    else if (request.Ids.Count > 0)
+    {
+        var sql = "ALTER TABLE observability.alerts DELETE WHERE id IN @ids";
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("ids", request.Ids);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    return Results.Ok(new { message = "Alerts deleted successfully" });
+})
+.WithName("DeleteAlerts")
+.WithTags("Alerts")
+.RequireAuthorization();
+
+// Export alerts
+app.MapGet("/api/alerts/export", [Authorize] async (string format = "json") =>
+{
+    await using var conn = new ClickHouseConnection(connStr);
+    await conn.OpenAsync();
+
+    var sql = "SELECT * FROM observability.alerts ORDER BY ts DESC LIMIT 10000";
+    await using var cmd = conn.CreateCommand();
+    cmd.CommandText = sql;
+    await using var reader = await cmd.ExecuteReaderAsync();
+    
+    var results = new List<object>();
+    while (await reader.ReadAsync())
+    {
+        results.Add(new
+        {
+            id = reader.GetValue(0),
+            ts = reader.GetDateTime(1),
+            level = reader.GetString(2),
+            message = reader.GetString(3),
+            payload = reader.GetString(4)
+        });
+    }
+
+    if (format == "csv")
+    {
+        var csv = "Id,Timestamp,Level,Message\n";
+        foreach (dynamic alert in results)
+        {
+            csv += $"{alert.id},{alert.ts},{alert.level},\"{alert.message}\"\n";
+        }
+        return Results.Text(csv, "text/csv");
+    }
+
+    return Results.Ok(results);
+})
+.WithName("ExportAlerts")
+.WithTags("Alerts")
+.RequireAuthorization();
+
+app.MapGet("/", () => Results.Redirect("/swagger"));
+
+app.Run();

@@ -1,0 +1,52 @@
+data_dir = "/var/lib/vector"
+
+[sources.alerts]
+  type = "file"
+  include = ["/data/alerts-only.json"]
+  fingerprinting.strategy = "device_and_inode"
+  read_from = "beginning"
+
+[transforms.normalize]
+  type = "remap"
+  inputs = ["alerts"]
+  source = """
+  # Store original message before parsing
+  original_message = to_string!(.message)
+  
+  # Parse JSON from line
+  evt, err = parse_json(.message)
+  if err != null {
+    . = {}
+  } else {
+    . = evt
+  }
+  .payload = original_message
+  .id = md5(.payload)
+  .ts = format_timestamp!(now(), format: "%Y-%m-%d %H:%M:%S")
+  .level = "INFO"
+  .message = to_string(.alert.signature) ?? "Unknown"
+  .source_file = "/data/alerts-only.json"
+  .source_offset = 0
+  . = {
+    "id": .id,
+    "ts": .ts,
+    "level": .level,
+    "message": .message,
+    "payload": .payload,
+    "source_file": .source_file,
+    "source_offset": .source_offset
+  }
+  """
+
+[sinks.ch]
+  type = "clickhouse"
+  inputs = ["normalize"]
+  database = "observability"
+  table = "alerts"
+  endpoint = "http://clickhouse:8123"
+  auth.strategy = "basic"
+  auth.user = "vector"
+  auth.password = "vector"
+  skip_unknown_fields = true
+  [sinks.ch.encoding]
+    timestamp_format = "rfc3339"
