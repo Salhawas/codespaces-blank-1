@@ -41,7 +41,14 @@ function Alerts() {
 
     connection.on('NewAlert', (alert) => {
       console.log('🚨 New alert received:', alert);
-      setAlerts(prevAlerts => [alert, ...prevAlerts].slice(0, pageSize));
+      setAlerts(prevAlerts => {
+        // Check if alert already exists to prevent duplicates
+        if (prevAlerts.some(a => a.id === alert.id)) {
+          return prevAlerts;
+        }
+        // Add new alert at the top, limit to pageSize
+        return [alert, ...prevAlerts].slice(0, pageSize);
+      });
       setTotal(prevTotal => prevTotal + 1);
     });
 
@@ -280,11 +287,11 @@ function Alerts() {
                 <div className="col-message">Message</div>
                 <div className="col-details">Details</div>
               </div>
-              {alerts.map((alert, index) => {
+              {alerts.map((alert) => {
                 const payload = parsePayload(alert.payload);
                 const severityClass = getSeverityClass(alert.message);
                 return (
-                  <div key={alert.id + '-' + index} className={'alert-row ' + severityClass}>
+                  <div key={alert.id} className={'alert-row ' + severityClass}>
                     <div className="col-check">
                       <input type="checkbox" checked={selectedAlerts.has(alert.id)} onChange={() => toggleSelectAlert(alert.id)} />
                     </div>

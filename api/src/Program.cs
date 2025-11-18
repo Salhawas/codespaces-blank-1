@@ -90,11 +90,14 @@ await userService.InitializeUsersTable();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseStaticFiles(); // Enable static files for custom Swagger HTML
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
     c.SwaggerEndpoint("/swagger/v1/swagger.json", "Better than Cisco API v1");
     c.RoutePrefix = "swagger";
+    c.IndexStream = () => typeof(Program).Assembly.GetManifestResourceStream("api.wwwroot.swagger-custom.html") 
+        ?? File.OpenRead("wwwroot/swagger-custom.html");
 });
 
 app.MapHub<AlertsHub>("/alertsHub");

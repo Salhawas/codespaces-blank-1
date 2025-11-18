@@ -240,16 +240,18 @@
   gap: 1rem;
   padding: 1rem 1.5rem;
   border-bottom: 1px solid #f1f5f9;
-  transition: all 0.2s;
-  animation: fadeIn 0.3s ease;
+  transition: background-color 0.2s ease;
+  animation: slideInDown 0.4s ease-out;
 }
 
-@keyframes fadeIn {
+@keyframes slideInDown {
   from {
     opacity: 0;
+    transform: translateY(-20px);
   }
   to {
     opacity: 1;
+    transform: translateY(0);
   }
 }
 
