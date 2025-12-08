@@ -1,0 +1,39 @@
+{
+  "Version": 1,
+  "Hash": "0TzpC5lNcUMdodm09jfJDxCt7UCH01OMTO7P+gf1zN8=",
+  "Source": "api",
+  "BasePath": "_content/api",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [
+    {
+      "Name": "api/wwwroot",
+      "Source": "api",
+      "ContentRoot": "/workspaces/codespaces-blank/api/wwwroot/",
+      "BasePath": "_content/api",
+      "Pattern": "**"
+    }
+  ],
+  "Assets": [
+    {
+      "Identity": "/workspaces/codespaces-blank/api/wwwroot/swagger-custom.html",
+      "SourceId": "api",
+      "SourceType": "Discovered",
+      "ContentRoot": "/workspaces/codespaces-blank/api/wwwroot/",
+      "BasePath": "_content/api",
+      "RelativePath": "swagger-custom.html",
+      "AssetKind": "All",
+      "AssetMode": "All",
+      "AssetRole": "Primary",
+      "AssetMergeBehavior": "PreferTarget",
+      "AssetMergeSource": "",
+      "RelatedAsset": "",
+      "AssetTraitName": "",
+      "AssetTraitValue": "",
+      "CopyToOutputDirectory": "Never",
+      "CopyToPublishDirectory": "PreserveNewest",
+      "OriginalItemSpec": "wwwroot/swagger-custom.html"
+    }
+  ]
+}

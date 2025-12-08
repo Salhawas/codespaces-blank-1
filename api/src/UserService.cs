@@ -2,7 +2,7 @@ using Octonica.ClickHouseClient;
 
 public class UserService
 {
-    private const string connStr = "Host=clickhouse;Port=9000;Database=observability;User=vector;Password=vector;";
+    private const string connStr = "Host=127.0.0.1;Port=9000;Database=observability;User=default;";
     private readonly ILogger<UserService> _logger;
 
     public UserService(ILogger<UserService> logger)
@@ -23,9 +23,9 @@ public class UserService
                     username String,
                     email String,
                     password_hash String,
-                    role LowCardinality(String) DEFAULT 'User',
-                    created_at DateTime64(3, 'UTC') DEFAULT now64(),
-                    last_login_at Nullable(DateTime64(3, 'UTC')),
+                    role String DEFAULT 'User',
+                    created_at DateTime DEFAULT now(),
+                    last_login_at Nullable(DateTime),
                     is_active UInt8 DEFAULT 1
                 ) ENGINE = MergeTree()
                 ORDER BY (id, username)";
@@ -124,7 +124,7 @@ public class UserService
         await using var conn = new ClickHouseConnection(connStr);
         await conn.OpenAsync();
 
-        var sql = "ALTER TABLE observability.users UPDATE last_login_at = now64() WHERE id = @id";
+        var sql = "ALTER TABLE observability.users UPDATE last_login_at = now() WHERE id = @id";
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.AddWithValue("id", userId);

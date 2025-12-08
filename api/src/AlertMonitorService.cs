@@ -5,7 +5,7 @@ public class AlertMonitorService : BackgroundService
 {
     private readonly IHubContext<AlertsHub> _hubContext;
     private readonly ILogger<AlertMonitorService> _logger;
-    private const string connStr = "Host=clickhouse;Port=9000;Database=observability;User=vector;Password=vector;";
+    private const string connStr = "Host=127.0.0.1;Port=9000;Database=observability;User=default;";
     private DateTime _lastCheck;
 
     public AlertMonitorService(IHubContext<AlertsHub> hubContext, ILogger<AlertMonitorService> logger)
@@ -39,7 +39,7 @@ public class AlertMonitorService : BackgroundService
         try
         {
             await using var conn = new ClickHouseConnection(connStr);
-            await conn.OpenAsync();
+            conn.Open();
             
             var sql = @"SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at 
                        FROM observability.alerts 
@@ -51,7 +51,7 @@ public class AlertMonitorService : BackgroundService
             cmd.Parameters.AddWithValue("lastCheck", _lastCheck);
 
             await using var reader = await cmd.ExecuteReaderAsync();
-            
+
             while (await reader.ReadAsync())
             {
                 var alert = new

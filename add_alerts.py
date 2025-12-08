@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Real-time Alert Generator for Better than Cisco
-Continuously adds new security alerts to the alerts-only.json file
+Continuously adds new security alerts to the eve.json file (newline-delimited JSON)
 """
 
 import json
 import time
 import random
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Sample alert templates
 ALERT_TEMPLATES = [
@@ -77,20 +78,34 @@ def generate_ip():
     """Generate random IP address"""
     return f"10.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 255)}"
 
+def suricata_timestamp():
+    zoned = datetime.now(timezone.utc).astimezone()
+    return zoned.strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+
+
 def generate_alert():
     """Generate a new alert based on templates"""
     template = random.choice(ALERT_TEMPLATES)
-    
+
+    timestamp = suricata_timestamp()
+    src_ip = generate_ip()
+    dest_ip = generate_ip()
+    direction = random.choice(["to_server", "to_client"])
+
     alert = {
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "flow_id": random.randint(1000000000000000, 9999999999999999),
-        "pcap_cnt": random.randint(1000, 999999),
+        "timestamp": timestamp,
+        "flow_id": random.randint(100000000000000, 999999999999999),
+        "in_iface": "simulated0",
         "event_type": "alert",
-        "src_ip": generate_ip(),
+        "src_ip": src_ip,
         "src_port": random.randint(1024, 65535),
-        "dest_ip": generate_ip(),
-        "dest_port": random.choice([22, 80, 443, 3389, 8080, 3306, 5432]),
+        "dest_ip": dest_ip,
+        "dest_port": random.choice([22, 53, 80, 443, 3389, 8080, 3306, 5432]),
         "proto": template["proto"],
+        "ip_v": 4,
+        "pkt_src": "generated",
+        "direction": direction,
+        "pcap_cnt": random.randint(1000, 999999),
         "alert": {
             "action": "allowed",
             "gid": 1,
@@ -105,43 +120,40 @@ def generate_alert():
             "pkts_toclient": random.randint(1, 100),
             "bytes_toserver": random.randint(100, 10000),
             "bytes_toclient": random.randint(100, 10000),
-            "start": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            "start": suricata_timestamp(),
+            "src_ip": src_ip,
+            "dest_ip": dest_ip
         }
     }
-    
+
     return alert
 
-def add_alert_to_file(filename="alerts-only.json"):
-    """Add a new alert to the JSON file"""
+def add_alert_to_file(filename="eve.json"):
+    """Append a new alert to the NDJSON file."""
     try:
-        # Read existing alerts
-        with open(filename, 'r') as f:
-            content = f.read().strip()
-            if content:
-                # Split by newlines and parse each line as JSON
-                alerts = [json.loads(line) for line in content.split('\n') if line.strip()]
-            else:
-                alerts = []
-        
-        # Generate new alert
+        eve_path = Path(filename)
+        eve_path.parent.mkdir(parents=True, exist_ok=True)
+        if not eve_path.exists():
+            eve_path.touch()
+
         new_alert = generate_alert()
-        alerts.append(new_alert)
-        
-        # Write back to file (NDJSON format - one JSON per line)
-        with open(filename, 'w') as f:
-            for alert in alerts:
-                f.write(json.dumps(alert) + '\n')
-        
+
+        with eve_path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(new_alert))
+            handle.write('\n')
+
         severity_map = {1: "CRITICAL", 2: "HIGH", 3: "MEDIUM", 4: "LOW"}
         severity_level = severity_map.get(new_alert['alert']['severity'], "INFO")
-        
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Added alert: {new_alert['alert']['signature']} "
-              f"({severity_level}) | {new_alert['src_ip']}:{new_alert['src_port']} → "
-              f"{new_alert['dest_ip']}:{new_alert['dest_port']}")
-        
+
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] ✓ Added alert: {new_alert['alert']['signature']} "
+            f"({severity_level}) | {new_alert['src_ip']}:{new_alert['src_port']} → "
+            f"{new_alert['dest_ip']}:{new_alert['dest_port']}"
+        )
+
         return True
-    except Exception as e:
-        print(f"[ERROR] Failed to add alert: {e}")
+    except Exception as exc:
+        print(f"[ERROR] Failed to add alert: {exc}")
         return False
 
 def main():

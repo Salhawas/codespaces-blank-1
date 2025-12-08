@@ -2,7 +2,7 @@ data_dir = "/var/lib/vector"
 
 [sources.alerts]
   type = "file"
-  include = ["/data/alerts-only.json"]
+  include = ["/data/eve.json"]
   fingerprinting.strategy = "device_and_inode"
   read_from = "beginning"
 
@@ -14,27 +14,44 @@ data_dir = "/var/lib/vector"
   original_message = to_string!(.message)
   
   # Parse JSON from line
-  evt, err = parse_json(.message)
-  if err != null {
-    . = {}
-  } else {
-    . = evt
+  evt = parse_json!(original_message)
+  . = evt
+  if .event_type != "alert" {
+    abort
   }
-  .payload = original_message
-  .id = md5(.payload)
-  .ts = format_timestamp!(now(), format: "%Y-%m-%d %H:%M:%S")
-  .level = "INFO"
-  .message = to_string(.alert.signature) ?? "Unknown"
-  .source_file = "/data/alerts-only.json"
-  .source_offset = 0
+
+  parsed_ts = now()
+  ts_candidate, ts_err = parse_timestamp(.timestamp, format: "%FT%T%.f%z")
+  if ts_err == null {
+    parsed_ts = ts_candidate
+  }
+
+  severity = 0
+  sev_val, severity_err = to_int(.alert.severity)
+  if severity_err == null && sev_val != null {
+    severity = sev_val
+  }
+  level = "INFO"
+  if severity == 1 {
+    level = "CRITICAL"
+  } else if severity == 2 {
+    level = "HIGH"
+  } else if severity == 3 {
+    level = "MEDIUM"
+  } else if severity == 4 {
+    level = "LOW"
+  }
+
+  signature = to_string(.alert.signature) ?? "Unknown alert"
+
   . = {
-    "id": .id,
-    "ts": .ts,
-    "level": .level,
-    "message": .message,
-    "payload": .payload,
-    "source_file": .source_file,
-    "source_offset": .source_offset
+    "id": md5(to_string(.flow_id) ?? original_message),
+    "ts": format_timestamp!(parsed_ts, format: "%Y-%m-%d %H:%M:%S"),
+    "level": level,
+    "message": signature,
+    "payload": original_message,
+    "source_file": "/data/eve.json",
+    "source_offset": 0
   }
   """
 
@@ -43,10 +60,7 @@ data_dir = "/var/lib/vector"
   inputs = ["normalize"]
   database = "observability"
   table = "alerts"
-  endpoint = "http://clickhouse:8123"
-  auth.strategy = "basic"
-  auth.user = "vector"
-  auth.password = "vector"
+  endpoint = "http://127.0.0.1:8123"
   skip_unknown_fields = true
   [sinks.ch.encoding]
     timestamp_format = "rfc3339"

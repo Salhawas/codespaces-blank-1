@@ -1,8 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Search, Filter, Download, Trash2, ChevronLeft, ChevronRight, Calendar, AlertCircle } from 'lucide-react';
 import { alertsAPI } from '../services/api';
 import * as signalR from '@microsoft/signalr';
 import './Alerts.css';
+
+const filterTemplate = {
+  severity: '',
+  startDate: '',
+  endDate: '',
+  sourceIp: '',
+  destIp: ''
+};
 
 function Alerts() {
   const [alerts, setAlerts] = useState([]);
@@ -14,18 +22,75 @@ function Alerts() {
   const [total, setTotal] = useState(0);
   const pageSize = 20;
 
-  const [filters, setFilters] = useState({
-    severity: '',
-    startDate: '',
-    endDate: '',
-    sourceIp: '',
-    destIp: ''
-  });
+  const [filters, setFilters] = useState(() => ({ ...filterTemplate }));
+  const [appliedFilters, setAppliedFilters] = useState(() => ({ ...filterTemplate }));
+  const [viewMode, setViewMode] = useState('browse');
+  const [searchConfig, setSearchConfig] = useState(null);
+  const toAlertList = (value) => (Array.isArray(value) ? value : []);
+  const [selectedAlert, setSelectedAlert] = useState(null);
+
+  const fetchAlerts = async (pageToLoad = 1, filtersToUse = appliedFilters) => {
+    setLoading(true);
+    try {
+      const params = {
+        limit: pageSize,
+        offset: (pageToLoad - 1) * pageSize
+      };
+
+      if (filtersToUse.severity) params.severity = filtersToUse.severity;
+      if (filtersToUse.startDate) params.since = new Date(filtersToUse.startDate).toISOString();
+      if (filtersToUse.endDate) params.until = new Date(filtersToUse.endDate).toISOString();
+      if (filtersToUse.sourceIp) params.sourceIp = filtersToUse.sourceIp;
+      if (filtersToUse.destIp) params.destIp = filtersToUse.destIp;
+
+      const response = await alertsAPI.getAlerts(params);
+      const { data, total: totalCount } = response.data ?? {};
+      const normalized = toAlertList(data);
+      setAlerts(normalized);
+      setTotal(Number.isFinite(totalCount) ? totalCount : normalized.length);
+      setSelectedAlerts(new Set());
+    } catch (error) {
+      console.error('Failed to load alerts:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchSearchResults = async (pageToLoad = 1, params = searchConfig) => {
+    if (!params) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const payload = {
+        query: params.query || '',
+        page: pageToLoad,
+        pageSize
+      };
+
+      if (params.startDate) payload.startDate = new Date(params.startDate).toISOString();
+      if (params.endDate) payload.endDate = new Date(params.endDate).toISOString();
+      if (params.severity) payload.severity = params.severity;
+      if (params.sourceIp) payload.sourceIp = params.sourceIp;
+      if (params.destIp) payload.destIp = params.destIp;
+
+      const response = await alertsAPI.searchAlerts(payload);
+      const body = response.data ?? {};
+      const normalized = toAlertList(body.data);
+      setAlerts(normalized);
+      setTotal(Number.isFinite(body.total) ? body.total : normalized.length);
+      setSelectedAlerts(new Set());
+    } catch (error) {
+      console.error('Search failed:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    loadAlerts();
-    
-    // Setup SignalR connection for real-time updates
+    fetchAlerts(1, appliedFilters);
+
     const connection = new signalR.HubConnectionBuilder()
       .withUrl('http://localhost:8080/alertsHub', {
         skipNegotiation: true,
@@ -35,19 +100,19 @@ function Alerts() {
       .withAutomaticReconnect()
       .build();
 
-    connection.start()
+    connection
+      .start()
       .then(() => console.log('✅ Connected to real-time alerts'))
       .catch(err => console.error('SignalR connection error:', err));
 
     connection.on('NewAlert', (alert) => {
       console.log('🚨 New alert received:', alert);
       setAlerts(prevAlerts => {
-        // Check if alert already exists to prevent duplicates
-        if (prevAlerts.some(a => a.id === alert.id)) {
-          return prevAlerts;
+        const current = Array.isArray(prevAlerts) ? prevAlerts : [];
+        if (current.some(existing => existing.id === alert.id)) {
+          return current;
         }
-        // Add new alert at the top, limit to pageSize
-        return [alert, ...prevAlerts].slice(0, pageSize);
+        return [alert, ...current].slice(0, pageSize);
       });
       setTotal(prevTotal => prevTotal + 1);
     });
@@ -55,36 +120,45 @@ function Alerts() {
     return () => {
       connection.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    loadAlerts();
-  }, [page]);
-
-  const loadAlerts = async () => {
-    setLoading(true);
-    try {
-      const response = await alertsAPI.getAlerts({ limit: pageSize, offset: (page - 1) * pageSize });
-      setAlerts(response.data);
-      setTotal(response.data.length);
-    } catch (error) {
-      console.error('Failed to load alerts:', error);
+  const goToPage = async (targetPage) => {
+    if (targetPage < 1) {
+      return;
     }
-    setLoading(false);
+
+    setPage(targetPage);
+    if (viewMode === 'search' && searchConfig) {
+      await fetchSearchResults(targetPage, searchConfig);
+    } else {
+      await fetchAlerts(targetPage, appliedFilters);
+    }
   };
 
   const handleSearch = async () => {
-    setLoading(true);
-    setPage(1);
-    try {
-      const searchParams = { query: searchQuery, ...filters, page: 1, pageSize };
-      const response = await alertsAPI.searchAlerts(searchParams);
-      setAlerts(response.data.data);
-      setTotal(response.data.total);
-    } catch (error) {
-      console.error('Search failed:', error);
+    const trimmedQuery = searchQuery.trim();
+    const params = {
+      query: trimmedQuery,
+      severity: filters.severity,
+      startDate: filters.startDate,
+      endDate: filters.endDate,
+      sourceIp: filters.sourceIp,
+      destIp: filters.destIp
+    };
+
+    if (!trimmedQuery && !params.severity && !params.startDate && !params.endDate && !params.sourceIp && !params.destIp) {
+      setSearchConfig(null);
+      setViewMode('browse');
+      setPage(1);
+      await fetchAlerts(1, filters);
+      return;
     }
-    setLoading(false);
+
+    setSearchConfig(params);
+    setViewMode('search');
+    setPage(1);
+    await fetchSearchResults(1, params);
   };
 
   const handleExport = async (format) => {
@@ -94,34 +168,41 @@ function Alerts() {
         type: format === 'csv' ? 'text/csv' : 'application/json'
       });
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'alerts-export.' + format;
-      a.click();
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'alerts-export.' + format;
+      anchor.click();
     } catch (error) {
       console.error('Export failed:', error);
     }
   };
 
   const handleDeleteSelected = async () => {
-    if (!confirm('Delete ' + selectedAlerts.size + ' selected alerts?')) return;
+    if (!confirm('Delete ' + selectedAlerts.size + ' selected alerts?')) {
+      return;
+    }
+
     try {
       await alertsAPI.deleteAlerts({ ids: Array.from(selectedAlerts) });
       setSelectedAlerts(new Set());
-      loadAlerts();
+      if (viewMode === 'search' && searchConfig) {
+        await fetchSearchResults(page, searchConfig);
+      } else {
+        await fetchAlerts(page, appliedFilters);
+      }
     } catch (error) {
       console.error('Delete failed:', error);
     }
   };
 
   const toggleSelectAlert = (id) => {
-    const newSelected = new Set(selectedAlerts);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
+    const updated = new Set(selectedAlerts);
+    if (updated.has(id)) {
+      updated.delete(id);
     } else {
-      newSelected.add(id);
+      updated.add(id);
     }
-    setSelectedAlerts(newSelected);
+    setSelectedAlerts(updated);
   };
 
   const toggleSelectAll = () => {
@@ -133,63 +214,45 @@ function Alerts() {
   };
 
   const applyFilters = async () => {
-    setLoading(true);
+    const nextFilters = { ...filters };
+    setAppliedFilters(nextFilters);
+    setSearchConfig(null);
+    setViewMode('browse');
     setPage(1);
-    try {
-      let filteredAlerts = alerts;
-      
-      // Apply severity filter
-      if (filters.severity) {
-        filteredAlerts = filteredAlerts.filter(a => 
-          a.level?.toUpperCase() === filters.severity.toUpperCase()
-        );
-      }
-      
-      // Apply date filters
-      if (filters.startDate) {
-        const startDate = new Date(filters.startDate);
-        filteredAlerts = filteredAlerts.filter(a => new Date(a.ts) >= startDate);
-      }
-      
-      if (filters.endDate) {
-        const endDate = new Date(filters.endDate);
-        filteredAlerts = filteredAlerts.filter(a => new Date(a.ts) <= endDate);
-      }
-      
-      setAlerts(filteredAlerts);
-      setTotal(filteredAlerts.length);
-    } catch (error) {
-      console.error('Filter failed:', error);
-    }
-    setLoading(false);
+    await fetchAlerts(1, nextFilters);
   };
 
-  const clearFilters = () => {
-    setFilters({
-      severity: '',
-      startDate: '',
-      endDate: '',
-      sourceIp: '',
-      destIp: ''
-    });
-    loadAlerts();
+  const clearFilters = async () => {
+    const reset = { ...filterTemplate };
+    setFilters(reset);
+    setAppliedFilters(reset);
+    setSearchConfig(null);
+    setViewMode('browse');
+    setSearchQuery('');
+    setPage(1);
+    await fetchAlerts(1, reset);
   };
 
-  const getSeverityClass = (message) => {
-    const lower = message.toLowerCase();
-    if (lower.includes('critical')) return 'critical';
-    if (lower.includes('scan') || lower.includes('attack')) return 'high';
-    if (lower.includes('suspicious')) return 'medium';
+  const getSeverityClass = (level) => {
+    const normalized = (level || '').toUpperCase();
+    if (normalized === 'CRITICAL') return 'critical';
+    if (normalized === 'HIGH') return 'high';
+    if (normalized === 'MEDIUM') return 'medium';
+    if (normalized === 'LOW') return 'low';
     return 'info';
   };
 
   const parsePayload = (payloadStr) => {
     try {
-      return JSON.parse(payloadStr);
+      const parsed = JSON.parse(payloadStr);
+      return parsed && typeof parsed === 'object' ? parsed : null;
     } catch {
       return null;
     }
   };
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const nextDisabled = page >= totalPages;
 
   if (loading && alerts.length === 0) {
     return (
@@ -228,10 +291,19 @@ function Alerts() {
       <div className="search-section">
         <div className="search-bar">
           <Search size={20} />
-          <input type="text" placeholder="Search alerts by message, IP address, or payload..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleSearch()} />
+          <input
+            type="text"
+            placeholder="Search alerts by message, IP address, or payload..."
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
+          />
           <button onClick={handleSearch}>Search</button>
         </div>
-        <button className={'filter-toggle ' + (showFilters ? 'active' : '')} onClick={() => setShowFilters(!showFilters)}>
+        <button
+          className={'filter-toggle ' + (showFilters ? 'active' : '')}
+          onClick={() => setShowFilters(!showFilters)}
+        >
           <Filter size={18} />
           Filters
         </button>
@@ -241,7 +313,10 @@ function Alerts() {
         <div className="filters-panel">
           <div className="filter-group">
             <label>Severity</label>
-            <select value={filters.severity} onChange={(e) => setFilters({...filters, severity: e.target.value})}>
+            <select
+              value={filters.severity}
+              onChange={(event) => setFilters({ ...filters, severity: event.target.value })}
+            >
               <option value="">All Levels</option>
               <option value="INFO">Info</option>
               <option value="MEDIUM">Medium</option>
@@ -251,11 +326,37 @@ function Alerts() {
           </div>
           <div className="filter-group">
             <label>Start Date</label>
-            <input type="datetime-local" value={filters.startDate} onChange={(e) => setFilters({...filters, startDate: e.target.value})} />
+            <input
+              type="datetime-local"
+              value={filters.startDate}
+              onChange={(event) => setFilters({ ...filters, startDate: event.target.value })}
+            />
           </div>
           <div className="filter-group">
             <label>End Date</label>
-            <input type="datetime-local" value={filters.endDate} onChange={(e) => setFilters({...filters, endDate: e.target.value})} />
+            <input
+              type="datetime-local"
+              value={filters.endDate}
+              onChange={(event) => setFilters({ ...filters, endDate: event.target.value })}
+            />
+          </div>
+          <div className="filter-group">
+            <label>Source IP</label>
+            <input
+              type="text"
+              value={filters.sourceIp}
+              onChange={(event) => setFilters({ ...filters, sourceIp: event.target.value })}
+              placeholder="e.g. 10.0.0.5"
+            />
+          </div>
+          <div className="filter-group">
+            <label>Destination IP</label>
+            <input
+              type="text"
+              value={filters.destIp}
+              onChange={(event) => setFilters({ ...filters, destIp: event.target.value })}
+              placeholder="e.g. 10.0.0.10"
+            />
           </div>
           <div className="filter-actions">
             <button className="action-btn" onClick={applyFilters}>Apply Filters</button>
@@ -275,8 +376,8 @@ function Alerts() {
             <div className="alerts-table">
               <div className="table-header">
                 <div className="col-check">
-                  <input 
-                    type="checkbox" 
+                  <input
+                    type="checkbox"
                     checked={alerts.length > 0 && selectedAlerts.size === alerts.length}
                     onChange={toggleSelectAll}
                     title="Select All"
@@ -284,16 +385,41 @@ function Alerts() {
                 </div>
                 <div className="col-time">Timestamp</div>
                 <div className="col-severity">Severity</div>
-                <div className="col-message">Message</div>
-                <div className="col-details">Details</div>
+                <div className="col-id">ID</div>
+                <div className="col-ip">Source IP</div>
+                <div className="col-ip">Destination IP</div>
+                <div className="col-proto">Protocol</div>
+                <div className="col-description">Description</div>
+                <div className="col-rule">Rule ID</div>
+                <div className="col-action">Action</div>
               </div>
-              {alerts.map((alert) => {
+              {alerts.map((alert, idx) => {
                 const payload = parsePayload(alert.payload);
-                const severityClass = getSeverityClass(alert.message);
+                const severityClass = getSeverityClass(alert.level);
+                const srcIp = payload?.src_ip ?? 'N/A';
+                const destIp = payload?.dest_ip ?? 'N/A';
+                const protocol = payload?.proto ?? payload?.protocol ?? 'N/A';
+                const description = payload?.alert?.signature ?? alert.message ?? 'N/A';
+                const ruleId = payload?.alert?.signature_id ?? 'N/A';
+                const action = payload?.alert?.action ?? 'N/A';
+                const displayIndex = alert.index ?? (page - 1) * pageSize + idx + 1;
                 return (
-                  <div key={alert.id} className={'alert-row ' + severityClass}>
+                  <div
+                    key={alert.id}
+                    className={'alert-row ' + severityClass}
+                    onClick={() => setSelectedAlert({ ...alert, payloadParsed: payload, displayIndex })}
+                    role="button"
+                    tabIndex={0}
+                  >
                     <div className="col-check">
-                      <input type="checkbox" checked={selectedAlerts.has(alert.id)} onChange={() => toggleSelectAlert(alert.id)} />
+                      <input
+                        type="checkbox"
+                        checked={selectedAlerts.has(alert.id)}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          toggleSelectAlert(alert.id);
+                        }}
+                      />
                     </div>
                     <div className="col-time">
                       <Calendar size={14} />
@@ -301,30 +427,29 @@ function Alerts() {
                     </div>
                     <div className="col-severity">
                       <span className={'severity-badge ' + severityClass}>
-                        {alert.level}
+                        {alert.level || 'INFO'}
                       </span>
                     </div>
-                    <div className="col-message">{alert.message}</div>
-                    <div className="col-details">
-                      {payload && (
-                        <div className="alert-details-inline">
-                          <span>{payload.src_ip || 'N/A'}</span>
-                          <span>→</span>
-                          <span>{payload.dest_ip || 'N/A'}</span>
-                        </div>
-                      )}
-                    </div>
+                    <div className="col-id" title={alert.id}>{displayIndex}</div>
+                    <div className="col-ip">{srcIp}</div>
+                    <div className="col-ip">{destIp}</div>
+                    <div className="col-proto">{protocol}</div>
+                    <div className="col-description">{description}</div>
+                    <div className="col-rule">{ruleId}</div>
+                    <div className="col-action">{action}</div>
                   </div>
                 );
               })}
             </div>
             <div className="pagination">
-              <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>
+              <button onClick={() => goToPage(page - 1)} disabled={page === 1}>
                 <ChevronLeft size={18} />
                 Previous
               </button>
-              <span>Page {page}</span>
-              <button onClick={() => setPage(p => p + 1)} disabled={alerts.length < pageSize}>
+              <span>
+                Page {page} of {totalPages}
+              </span>
+              <button onClick={() => goToPage(page + 1)} disabled={nextDisabled}>
                 Next
                 <ChevronRight size={18} />
               </button>
@@ -332,8 +457,63 @@ function Alerts() {
           </>
         )}
       </div>
+      {selectedAlert && (
+        <div className="modal-backdrop" onClick={() => setSelectedAlert(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+              <div className="modal-header">
+              <div>
+                <p className="modal-kicker">Alert #{selectedAlert.displayIndex}</p>
+                <h2>{selectedAlert.payloadParsed?.alert?.signature ?? selectedAlert.message ?? 'Alert details'}</h2>
+                <p className="modal-sub">{new Date(selectedAlert.ts).toLocaleString()}</p>
+              </div>
+              <button className="modal-close" onClick={() => setSelectedAlert(null)}>×</button>
+            </div>
+            <div className="modal-grid">
+              <div>
+                <p className="label">Severity</p>
+                <span className={'severity-badge ' + getSeverityClass(selectedAlert.level)}>
+                  {selectedAlert.level || 'INFO'}
+                </span>
+              </div>
+              <div>
+                <p className="label">Action</p>
+                <p className="value">{selectedAlert.payloadParsed?.alert?.action ?? 'N/A'}</p>
+              </div>
+              <div>
+                <p className="label">Rule ID</p>
+                <p className="value">{selectedAlert.payloadParsed?.alert?.signature_id ?? 'N/A'}</p>
+              </div>
+              <div>
+                <p className="label">Category</p>
+                <p className="value">{selectedAlert.payloadParsed?.alert?.category ?? 'N/A'}</p>
+              </div>
+              <div>
+                <p className="label">Source</p>
+                <p className="value">{selectedAlert.payloadParsed?.src_ip ?? 'N/A'}:{selectedAlert.payloadParsed?.src_port ?? '—'}</p>
+              </div>
+              <div>
+                <p className="label">Destination</p>
+                <p className="value">{selectedAlert.payloadParsed?.dest_ip ?? 'N/A'}:{selectedAlert.payloadParsed?.dest_port ?? '—'}</p>
+              </div>
+              <div>
+                <p className="label">Protocol</p>
+                <p className="value">{selectedAlert.payloadParsed?.proto ?? selectedAlert.payloadParsed?.protocol ?? 'N/A'}</p>
+              </div>
+              <div>
+                <p className="label">Flow ID</p>
+                <p className="value">{selectedAlert.payloadParsed?.flow_id ?? selectedAlert.id}</p>
+              </div>
+            </div>
+            <div className="modal-json">
+              <p className="label">Raw payload</p>
+              <pre>{JSON.stringify(selectedAlert.payloadParsed ?? selectedAlert.payload, null, 2)}</pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 export default Alerts;
+

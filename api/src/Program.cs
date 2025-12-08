@@ -4,20 +4,68 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
+using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
+
+const string CorsPolicy = "Frontend";
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(CorsPolicy, policy =>
+        policy.WithOrigins("http://127.0.0.1:5173", "http://localhost:5173")
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials());
+});
 
 // JWT Configuration
 var jwtSecret = builder.Configuration["Jwt:Secret"] ?? "your-super-secret-key-min-32-chars-long-please-change-this";
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "SecurityAlertSystem";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "SecurityAlertSystemUsers";
 
+// CORS configuration
+var defaultCorsOrigins = new[]
+{
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000"
+};
+
+var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+var envOriginsRaw = builder.Configuration["ALLOWED_ORIGINS"] ?? Environment.GetEnvironmentVariable("ALLOWED_ORIGINS");
+
+string[] allowedOrigins;
+
+if (!string.IsNullOrWhiteSpace(envOriginsRaw))
+{
+    var envOrigins = envOriginsRaw
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    allowedOrigins = configuredOrigins is { Length: > 0 }
+        ? configuredOrigins.Concat(envOrigins).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+        : envOrigins;
+}
+else
+{
+    allowedOrigins = configuredOrigins is { Length: > 0 }
+        ? configuredOrigins
+        : defaultCorsOrigins;
+}
+
+if (allowedOrigins.Length == 0)
+{
+    allowedOrigins = defaultCorsOrigins;
+}
+
+Console.WriteLine($"[CORS] Allowed origins: {string.Join(", ", allowedOrigins)}");
+
 // Add services
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000")
+        policy.WithOrigins(allowedOrigins)
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials();
@@ -87,9 +135,14 @@ var app = builder.Build();
 var userService = app.Services.GetRequiredService<UserService>();
 await userService.InitializeUsersTable();
 
-app.UseCors("AllowAll");
+app.UseRouting();
+app.UseCors(CorsPolicy);
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.MapControllers().RequireCors(CorsPolicy);
+app.MapHub<AlertsHub>("/alertsHub").RequireCors(CorsPolicy);
+
 app.UseStaticFiles(); // Enable static files for custom Swagger HTML
 app.UseSwagger();
 app.UseSwaggerUI(c =>
@@ -100,9 +153,7 @@ app.UseSwaggerUI(c =>
         ?? File.OpenRead("wwwroot/swagger-custom.html");
 });
 
-app.MapHub<AlertsHub>("/alertsHub");
-
-const string connStr = "Host=clickhouse;Port=9000;Database=observability;User=vector;Password=vector;";
+const string connStr = "Host=127.0.0.1;Port=9000;Database=observability;User=default;";
 
 // Auth endpoints
 app.MapPost("/api/auth/login", async (LoginRequest request, JwtService jwtService, UserService userService) =>
@@ -203,34 +254,95 @@ app.MapGet("/api/stats", [Authorize] async () =>
 .RequireAuthorization();
 
 // Get alerts with pagination and filtering
-app.MapGet("/api/alerts", [Authorize] async (int? limit, DateTime? since, string? severity) =>
+app.MapGet("/api/alerts", [Authorize] async (
+    int? limit,
+    int? offset,
+    DateTime? since,
+    DateTime? until,
+    string? severity,
+    string? sourceIp,
+    string? destIp) =>
 {
     await using var conn = new ClickHouseConnection(connStr);
     await conn.OpenAsync();
-    
-    var sql = "SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at FROM observability.alerts WHERE 1=1";
-    
+
+    var filters = new List<string>();
     if (since.HasValue)
-        sql += " AND ts >= @since";
+        filters.Add("ts >= @since");
+    if (until.HasValue)
+        filters.Add("ts <= @until");
     if (!string.IsNullOrEmpty(severity))
-        sql += " AND level = @severity";
-        
-    sql += " ORDER BY ts DESC LIMIT @limit";
+        filters.Add("level = @severity");
+    if (!string.IsNullOrEmpty(sourceIp))
+        filters.Add("coalesce(JSONExtractString(payload, 'src_ip'), '') = @sourceIp");
+    if (!string.IsNullOrEmpty(destIp))
+        filters.Add("coalesce(JSONExtractString(payload, 'dest_ip'), '') = @destIp");
+
+    var whereClause = filters.Count > 0
+        ? "WHERE " + string.Join(" AND ", filters)
+        : string.Empty;
+
+    var pageLimit = limit ?? 100;
+    var pageOffset = offset ?? 0;
+
+    var totalSql = $"SELECT count(*) FROM observability.alerts {whereClause}";
+    await using var countCmd = conn.CreateCommand();
+    countCmd.CommandText = totalSql;
+    if (since.HasValue)
+        countCmd.Parameters.AddWithValue("since", since.Value);
+    if (!string.IsNullOrEmpty(severity))
+        countCmd.Parameters.AddWithValue("severity", severity);
+    if (until.HasValue)
+        countCmd.Parameters.AddWithValue("until", until.Value);
+    if (!string.IsNullOrEmpty(sourceIp))
+        countCmd.Parameters.AddWithValue("sourceIp", sourceIp);
+    if (!string.IsNullOrEmpty(destIp))
+        countCmd.Parameters.AddWithValue("destIp", destIp);
+    var total = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+
+    var dataSql = $@"
+        SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at, idx
+        FROM (
+            SELECT 
+                id,
+                ts,
+                level,
+                message,
+                payload,
+                source_file,
+                source_offset,
+                ingested_at,
+                row_number() OVER (ORDER BY ts ASC, id ASC) AS idx
+            FROM observability.alerts
+            {whereClause}
+        )
+        ORDER BY ts DESC
+        LIMIT @limit OFFSET @offset";
 
     await using var cmd = conn.CreateCommand();
-    cmd.CommandText = sql;
-    cmd.Parameters.AddWithValue("limit", limit ?? 100);
+    cmd.CommandText = dataSql;
+    cmd.Parameters.AddWithValue("limit", pageLimit);
+    cmd.Parameters.AddWithValue("offset", pageOffset);
     if (since.HasValue)
         cmd.Parameters.AddWithValue("since", since.Value);
+    if (until.HasValue)
+        cmd.Parameters.AddWithValue("until", until.Value);
     if (!string.IsNullOrEmpty(severity))
         cmd.Parameters.AddWithValue("severity", severity);
+    if (!string.IsNullOrEmpty(sourceIp))
+        cmd.Parameters.AddWithValue("sourceIp", sourceIp);
+    if (!string.IsNullOrEmpty(destIp))
+        cmd.Parameters.AddWithValue("destIp", destIp);
 
     await using var reader = await cmd.ExecuteReaderAsync();
     var results = new List<object>();
+    var rowNumber = 0;
     while (await reader.ReadAsync())
     {
+        var index = total - (pageOffset + rowNumber);
         results.Add(new
         {
+            index,
             id = reader.GetValue(0),
             ts = reader.GetDateTime(1),
             level = reader.GetString(2),
@@ -238,10 +350,13 @@ app.MapGet("/api/alerts", [Authorize] async (int? limit, DateTime? since, string
             payload = reader.GetString(4),
             source_file = reader.GetString(5),
             source_offset = reader.GetUInt64(6),
-            ingested_at = reader.GetDateTime(7)
+            ingested_at = reader.GetDateTime(7),
+            idx = reader.GetInt64(8)
         });
+        rowNumber++;
     }
-    return Results.Ok(results);
+
+    return Results.Ok(new { data = results, total, limit = pageLimit, offset = pageOffset });
 })
 .WithName("GetAlerts")
 .WithTags("Alerts")
@@ -272,11 +387,32 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
     sql += string.Join(" AND ", conditions);
     sql += " ORDER BY ts DESC LIMIT @limit OFFSET @offset";
 
+    var pageOffset = (request.Page - 1) * request.PageSize;
+
+    // Total count first
+    var countSql = "SELECT count(*) FROM observability.alerts WHERE " + string.Join(" AND ", conditions);
+    await using var countCmd = conn.CreateCommand();
+    countCmd.CommandText = countSql;
+    if (!string.IsNullOrEmpty(request.Query))
+        countCmd.Parameters.AddWithValue("query", $"%{request.Query}%");
+    if (request.StartDate.HasValue)
+        countCmd.Parameters.AddWithValue("startDate", request.StartDate.Value);
+    if (request.EndDate.HasValue)
+        countCmd.Parameters.AddWithValue("endDate", request.EndDate.Value);
+    if (!string.IsNullOrEmpty(request.Severity))
+        countCmd.Parameters.AddWithValue("severity", request.Severity);
+    if (!string.IsNullOrEmpty(request.SourceIp))
+        countCmd.Parameters.AddWithValue("sourceIp", $"%{request.SourceIp}%");
+    if (!string.IsNullOrEmpty(request.DestIp))
+        countCmd.Parameters.AddWithValue("destIp", $"%{request.DestIp}%");
+
+    var total = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
+
+    // Paged data
     await using var cmd = conn.CreateCommand();
     cmd.CommandText = sql;
     cmd.Parameters.AddWithValue("limit", request.PageSize);
-    cmd.Parameters.AddWithValue("offset", (request.Page - 1) * request.PageSize);
-    
+    cmd.Parameters.AddWithValue("offset", pageOffset);
     if (!string.IsNullOrEmpty(request.Query))
         cmd.Parameters.AddWithValue("query", $"%{request.Query}%");
     if (request.StartDate.HasValue)
@@ -292,10 +428,13 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
 
     await using var reader = await cmd.ExecuteReaderAsync();
     var results = new List<object>();
+    var rowNumber = 0;
     while (await reader.ReadAsync())
     {
+        var index = total - (pageOffset + rowNumber);
         results.Add(new
         {
+            index,
             id = reader.GetValue(0),
             ts = reader.GetDateTime(1),
             level = reader.GetString(2),
@@ -305,12 +444,8 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
             source_offset = reader.GetUInt64(6),
             ingested_at = reader.GetDateTime(7)
         });
+        rowNumber++;
     }
-
-    // Get total count
-    var countSql = "SELECT count(*) FROM observability.alerts WHERE " + string.Join(" AND ", conditions);
-    cmd.CommandText = countSql;
-    var total = Convert.ToInt64(await cmd.ExecuteScalarAsync());
 
     return Results.Ok(new { data = results, total, page = request.Page, pageSize = request.PageSize });
 })
