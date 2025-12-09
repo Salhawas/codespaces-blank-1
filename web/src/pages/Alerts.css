@@ -300,6 +300,24 @@
   font-size: 0.875rem;
 }
 
+.col-time.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s;
+}
+
+.col-time.sortable:hover {
+  color: #3b82f6;
+}
+
+.table-header .col-time.sortable {
+  color: #334155;
+}
+
+.table-header .col-time.sortable:hover {
+  color: #3b82f6;
+}
+
 .col-severity {
   display: flex;
   align-items: center;
