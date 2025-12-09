@@ -408,9 +408,10 @@ function Alerts() {
                   }}
                   role="button" 
                   tabIndex={0}
+                  aria-label={`Sort by timestamp ${sortOrder === 'desc' ? 'descending' : 'ascending'}`}
                 >
                   Timestamp
-                  {sortOrder === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+                  {sortOrder === 'desc' ? <ArrowDown size={16} aria-hidden="true" /> : <ArrowUp size={16} aria-hidden="true" />}
                 </div>
                 <div className="col-severity">Severity</div>
                 <div className="col-id">ID</div>

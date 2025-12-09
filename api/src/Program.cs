@@ -346,7 +346,7 @@ app.MapGet("/api/alerts", [Authorize] async (
             FROM observability.alerts
         )
         {outerWhereClause}
-        ORDER BY ts {orderByDirection}
+        ORDER BY ts {orderByDirection}, ingested_at {orderByDirection}
         LIMIT {pageLimit} OFFSET {pageOffset}";
 
     await using var cmd = conn.CreateCommand();
