@@ -42,6 +42,7 @@ public class AlertSearchRequest
     public string? DestIp { get; set; }
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 50;
+    public string? SortOrder { get; set; }
 }
 
 public class BulkDeleteRequest

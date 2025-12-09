@@ -262,7 +262,8 @@ app.MapGet("/api/alerts", [Authorize] async (
     DateTime? until,
     string? severity,
     string? sourceIp,
-    string? destIp) =>
+    string? destIp,
+    string? sortOrder) =>
 {
     await using var conn = new ClickHouseConnection(connStr);
     await conn.OpenAsync();
@@ -322,6 +323,9 @@ app.MapGet("/api/alerts", [Authorize] async (
         ? "WHERE " + string.Join(" AND ", outerFilters)
         : string.Empty;
 
+    // Determine sort direction based on sortOrder parameter (default is desc)
+    var orderByDirection = string.IsNullOrEmpty(sortOrder) || sortOrder.ToLower() == "desc" ? "DESC" : "ASC";
+
     var dataSql = $@"
         SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at, idx
         FROM (
@@ -338,7 +342,7 @@ app.MapGet("/api/alerts", [Authorize] async (
             FROM observability.alerts
         )
         {outerWhereClause}
-        ORDER BY idx DESC
+        ORDER BY ts {orderByDirection}
         LIMIT {pageLimit} OFFSET {pageOffset}";
 
     await using var cmd = conn.CreateCommand();
@@ -402,7 +406,10 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
         conditions.Add("payload ILIKE @destIp");
 
     sql += string.Join(" AND ", conditions);
-    sql += " ORDER BY ts DESC LIMIT @limit OFFSET @offset";
+    
+    // Determine sort direction based on sortOrder parameter (default is desc)
+    var orderByDirection = string.IsNullOrEmpty(request.SortOrder) || request.SortOrder.ToLower() == "desc" ? "DESC" : "ASC";
+    sql += $" ORDER BY ts {orderByDirection} LIMIT @limit OFFSET @offset";
 
     long pageOffset = (request.Page - 1) * request.PageSize;
     if (pageOffset < 0) pageOffset = 0;

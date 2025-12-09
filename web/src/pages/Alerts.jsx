@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, Filter, Download, Trash2, ChevronLeft, ChevronRight, Calendar, AlertCircle } from 'lucide-react';
+import { Search, Filter, Download, Trash2, ChevronLeft, ChevronRight, Calendar, AlertCircle, ArrowUp, ArrowDown } from 'lucide-react';
 import { alertsAPI } from '../services/api';
 import * as signalR from '@microsoft/signalr';
 import './Alerts.css';
@@ -28,13 +28,15 @@ function Alerts() {
   const [searchConfig, setSearchConfig] = useState(null);
   const toAlertList = (value) => (Array.isArray(value) ? value : []);
   const [selectedAlert, setSelectedAlert] = useState(null);
+  const [sortOrder, setSortOrder] = useState('desc'); // 'asc' or 'desc'
 
-  const fetchAlerts = async (pageToLoad = 1, filtersToUse = appliedFilters) => {
+  const fetchAlerts = async (pageToLoad = 1, filtersToUse = appliedFilters, sortOrderToUse = sortOrder) => {
     setLoading(true);
     try {
       const params = {
         limit: pageSize,
-        offset: (pageToLoad - 1) * pageSize
+        offset: (pageToLoad - 1) * pageSize,
+        sortOrder: sortOrderToUse
       };
 
       if (filtersToUse.severity) params.severity = filtersToUse.severity;
@@ -56,7 +58,7 @@ function Alerts() {
     }
   };
 
-  const fetchSearchResults = async (pageToLoad = 1, params = searchConfig) => {
+  const fetchSearchResults = async (pageToLoad = 1, params = searchConfig, sortOrderToUse = sortOrder) => {
     if (!params) {
       return;
     }
@@ -66,7 +68,8 @@ function Alerts() {
       const payload = {
         query: params.query || '',
         page: pageToLoad,
-        pageSize
+        pageSize,
+        sortOrder: sortOrderToUse
       };
 
       if (params.startDate) payload.startDate = new Date(params.startDate).toISOString();
@@ -130,9 +133,9 @@ function Alerts() {
 
     setPage(targetPage);
     if (viewMode === 'search' && searchConfig) {
-      await fetchSearchResults(targetPage, searchConfig);
+      await fetchSearchResults(targetPage, searchConfig, sortOrder);
     } else {
-      await fetchAlerts(targetPage, appliedFilters);
+      await fetchAlerts(targetPage, appliedFilters, sortOrder);
     }
   };
 
@@ -186,9 +189,9 @@ function Alerts() {
       await alertsAPI.deleteAlerts({ ids: Array.from(selectedAlerts) });
       setSelectedAlerts(new Set());
       if (viewMode === 'search' && searchConfig) {
-        await fetchSearchResults(page, searchConfig);
+        await fetchSearchResults(page, searchConfig, sortOrder);
       } else {
-        await fetchAlerts(page, appliedFilters);
+        await fetchAlerts(page, appliedFilters, sortOrder);
       }
     } catch (error) {
       console.error('Delete failed:', error);
@@ -230,7 +233,18 @@ function Alerts() {
     setViewMode('browse');
     setSearchQuery('');
     setPage(1);
-    await fetchAlerts(1, reset);
+    await fetchAlerts(1, reset, sortOrder);
+  };
+
+  const toggleSortOrder = async () => {
+    const newSortOrder = sortOrder === 'desc' ? 'asc' : 'desc';
+    setSortOrder(newSortOrder);
+    setPage(1);
+    if (viewMode === 'search' && searchConfig) {
+      await fetchSearchResults(1, searchConfig, newSortOrder);
+    } else {
+      await fetchAlerts(1, appliedFilters, newSortOrder);
+    }
   };
 
   const getSeverityClass = (level) => {
@@ -383,7 +397,10 @@ function Alerts() {
                     title="Select All"
                   />
                 </div>
-                <div className="col-time">Timestamp</div>
+                <div className="col-time sortable" onClick={toggleSortOrder} role="button" tabIndex={0}>
+                  Timestamp
+                  {sortOrder === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+                </div>
                 <div className="col-severity">Severity</div>
                 <div className="col-id">ID</div>
                 <div className="col-ip">Source IP</div>
