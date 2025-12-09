@@ -411,14 +411,11 @@ function Alerts() {
                     role="button"
                     tabIndex={0}
                   >
-                    <div className="col-check">
+                    <div className="col-check" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={selectedAlerts.has(alert.id)}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleSelectAlert(alert.id);
-                        }}
+                        onChange={() => toggleSelectAlert(alert.id)}
                       />
                     </div>
                     <div className="col-time">

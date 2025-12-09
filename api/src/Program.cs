@@ -89,6 +89,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddControllers();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<JwtService>();
 builder.Services.AddSingleton<UserService>();
@@ -282,8 +283,11 @@ app.MapGet("/api/alerts", [Authorize] async (
         ? "WHERE " + string.Join(" AND ", filters)
         : string.Empty;
 
-    var pageLimit = limit ?? 100;
-    var pageOffset = offset ?? 0;
+    long pageLimit = limit ?? 100;
+    if (pageLimit < 1) pageLimit = 1;
+    if (pageLimit > 1000) pageLimit = 1000;
+    long pageOffset = offset ?? 0;
+    if (pageOffset < 0) pageOffset = 0;
 
     var totalSql = $"SELECT count(*) FROM observability.alerts {whereClause}";
     await using var countCmd = conn.CreateCommand();
@@ -300,6 +304,24 @@ app.MapGet("/api/alerts", [Authorize] async (
         countCmd.Parameters.AddWithValue("destIp", destIp);
     var total = Convert.ToInt64(await countCmd.ExecuteScalarAsync());
 
+    // Use a subquery to assign stable row numbers based on ingested_at order (oldest first = 1)
+    // Apply filters AFTER assigning stable row numbers to all data
+    var outerFilters = new List<string>();
+    if (since.HasValue)
+        outerFilters.Add("ts >= @since");
+    if (until.HasValue)
+        outerFilters.Add("ts <= @until");
+    if (!string.IsNullOrEmpty(severity))
+        outerFilters.Add("level = @severity");
+    if (!string.IsNullOrEmpty(sourceIp))
+        outerFilters.Add("coalesce(JSONExtractString(payload, 'src_ip'), '') = @sourceIp");
+    if (!string.IsNullOrEmpty(destIp))
+        outerFilters.Add("coalesce(JSONExtractString(payload, 'dest_ip'), '') = @destIp");
+
+    var outerWhereClause = outerFilters.Count > 0
+        ? "WHERE " + string.Join(" AND ", outerFilters)
+        : string.Empty;
+
     var dataSql = $@"
         SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at, idx
         FROM (
@@ -312,17 +334,16 @@ app.MapGet("/api/alerts", [Authorize] async (
                 source_file,
                 source_offset,
                 ingested_at,
-                row_number() OVER (ORDER BY ts ASC, id ASC) AS idx
+                row_number() OVER (ORDER BY ingested_at ASC, ts ASC) AS idx
             FROM observability.alerts
-            {whereClause}
         )
-        ORDER BY ts DESC
-        LIMIT @limit OFFSET @offset";
+        {outerWhereClause}
+        ORDER BY idx DESC
+        LIMIT {pageLimit} OFFSET {pageOffset}";
 
     await using var cmd = conn.CreateCommand();
     cmd.CommandText = dataSql;
-    cmd.Parameters.AddWithValue("limit", pageLimit);
-    cmd.Parameters.AddWithValue("offset", pageOffset);
+    // ClickHouse LIMIT/OFFSET must be non-null numeric types
     if (since.HasValue)
         cmd.Parameters.AddWithValue("since", since.Value);
     if (until.HasValue)
@@ -336,13 +357,11 @@ app.MapGet("/api/alerts", [Authorize] async (
 
     await using var reader = await cmd.ExecuteReaderAsync();
     var results = new List<object>();
-    var rowNumber = 0;
     while (await reader.ReadAsync())
     {
-        var index = total - (pageOffset + rowNumber);
         results.Add(new
         {
-            index,
+            index = reader.GetUInt64(8),  // Use the stable idx from the query (UInt64 from row_number)
             id = reader.GetValue(0),
             ts = reader.GetDateTime(1),
             level = reader.GetString(2),
@@ -350,10 +369,8 @@ app.MapGet("/api/alerts", [Authorize] async (
             payload = reader.GetString(4),
             source_file = reader.GetString(5),
             source_offset = reader.GetUInt64(6),
-            ingested_at = reader.GetDateTime(7),
-            idx = reader.GetInt64(8)
+            ingested_at = reader.GetDateTime(7)
         });
-        rowNumber++;
     }
 
     return Results.Ok(new { data = results, total, limit = pageLimit, offset = pageOffset });
@@ -387,7 +404,8 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
     sql += string.Join(" AND ", conditions);
     sql += " ORDER BY ts DESC LIMIT @limit OFFSET @offset";
 
-    var pageOffset = (request.Page - 1) * request.PageSize;
+    long pageOffset = (request.Page - 1) * request.PageSize;
+    if (pageOffset < 0) pageOffset = 0;
 
     // Total count first
     var countSql = "SELECT count(*) FROM observability.alerts WHERE " + string.Join(" AND ", conditions);
@@ -411,8 +429,8 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
     // Paged data
     await using var cmd = conn.CreateCommand();
     cmd.CommandText = sql;
-    cmd.Parameters.AddWithValue("limit", request.PageSize);
-    cmd.Parameters.AddWithValue("offset", pageOffset);
+    // Avoid nullable ints in ClickHouse LIMIT/OFFSET by inlining numeric values
+    cmd.CommandText = cmd.CommandText.Replace("LIMIT @limit OFFSET @offset", $"LIMIT {request.PageSize} OFFSET {pageOffset}");
     if (!string.IsNullOrEmpty(request.Query))
         cmd.Parameters.AddWithValue("query", $"%{request.Query}%");
     if (request.StartDate.HasValue)

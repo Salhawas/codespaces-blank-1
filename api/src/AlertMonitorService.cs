@@ -41,8 +41,19 @@ public class AlertMonitorService : BackgroundService
             await using var conn = new ClickHouseConnection(connStr);
             conn.Open();
             
-            var sql = @"SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at 
-                       FROM observability.alerts 
+            // First get the current max index (total count of alerts)
+            var countSql = "SELECT count() FROM observability.alerts";
+            await using var countCmd = conn.CreateCommand();
+            countCmd.CommandText = countSql;
+            var currentTotal = Convert.ToUInt64(await countCmd.ExecuteScalarAsync() ?? 0UL);
+            
+            // Get new alerts with their stable index based on ingested_at order
+            var sql = @"SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at, idx
+                       FROM (
+                           SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at,
+                                  row_number() OVER (ORDER BY ingested_at ASC, ts ASC) AS idx
+                           FROM observability.alerts
+                       )
                        WHERE ingested_at > @lastCheck 
                        ORDER BY ingested_at ASC";
 
@@ -56,6 +67,7 @@ public class AlertMonitorService : BackgroundService
             {
                 var alert = new
                 {
+                    index = reader.GetUInt64(8),  // The stable index from row_number
                     id = reader.GetValue(0),
                     ts = reader.GetDateTime(1),
                     level = reader.GetString(2),
@@ -67,7 +79,7 @@ public class AlertMonitorService : BackgroundService
                 };
 
                 await _hubContext.Clients.All.SendAsync("NewAlert", alert);
-                _logger.LogInformation($"Broadcast new alert: {alert.message}");
+                _logger.LogInformation($"Broadcast new alert: {alert.message} (index: {alert.index})");
                 
                 _lastCheck = alert.ingested_at;
             }
