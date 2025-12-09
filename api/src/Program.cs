@@ -323,8 +323,12 @@ app.MapGet("/api/alerts", [Authorize] async (
         ? "WHERE " + string.Join(" AND ", outerFilters)
         : string.Empty;
 
-    // Determine sort direction based on sortOrder parameter (default is desc)
-    var orderByDirection = string.IsNullOrEmpty(sortOrder) || sortOrder.ToLower() == "desc" ? "DESC" : "ASC";
+    // Whitelist the sort direction to prevent SQL injection
+    var orderByDirection = "DESC"; // Default to DESC
+    if (!string.IsNullOrEmpty(sortOrder) && sortOrder.Equals("asc", StringComparison.OrdinalIgnoreCase))
+    {
+        orderByDirection = "ASC";
+    }
 
     var dataSql = $@"
         SELECT id, ts, level, message, payload, source_file, source_offset, ingested_at, idx
@@ -407,8 +411,12 @@ app.MapPost("/api/alerts/search", [Authorize] async (AlertSearchRequest request)
 
     sql += string.Join(" AND ", conditions);
     
-    // Determine sort direction based on sortOrder parameter (default is desc)
-    var orderByDirection = string.IsNullOrEmpty(request.SortOrder) || request.SortOrder.ToLower() == "desc" ? "DESC" : "ASC";
+    // Whitelist the sort direction to prevent SQL injection
+    var orderByDirection = "DESC"; // Default to DESC
+    if (!string.IsNullOrEmpty(request.SortOrder) && request.SortOrder.Equals("asc", StringComparison.OrdinalIgnoreCase))
+    {
+        orderByDirection = "ASC";
+    }
     sql += $" ORDER BY ts {orderByDirection} LIMIT @limit OFFSET @offset";
 
     long pageOffset = (request.Page - 1) * request.PageSize;

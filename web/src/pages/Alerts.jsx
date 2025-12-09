@@ -397,7 +397,18 @@ function Alerts() {
                     title="Select All"
                   />
                 </div>
-                <div className="col-time sortable" onClick={toggleSortOrder} role="button" tabIndex={0}>
+                <div 
+                  className="col-time sortable" 
+                  onClick={toggleSortOrder}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      toggleSortOrder();
+                    }
+                  }}
+                  role="button" 
+                  tabIndex={0}
+                >
                   Timestamp
                   {sortOrder === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
                 </div>

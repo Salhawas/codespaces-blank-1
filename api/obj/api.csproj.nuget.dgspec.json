@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "/workspaces/codespaces-blank/api/api.csproj": {}
+    "/home/runner/work/codespaces-blank-1/codespaces-blank-1/api/api.csproj": {}
   },
   "projects": {
-    "/workspaces/codespaces-blank/api/api.csproj": {
+    "/home/runner/work/codespaces-blank-1/codespaces-blank-1/api/api.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/workspaces/codespaces-blank/api/api.csproj",
+        "projectUniqueName": "/home/runner/work/codespaces-blank-1/codespaces-blank-1/api/api.csproj",
         "projectName": "api",
-        "projectPath": "/workspaces/codespaces-blank/api/api.csproj",
-        "packagesPath": "/home/codespace/.nuget/packages/",
-        "outputPath": "/workspaces/codespaces-blank/api/obj/",
+        "projectPath": "/home/runner/work/codespaces-blank-1/codespaces-blank-1/api/api.csproj",
+        "packagesPath": "/home/runner/.nuget/packages/",
+        "outputPath": "/home/runner/work/codespaces-blank-1/codespaces-blank-1/api/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "/home/codespace/.nuget/NuGet/NuGet.Config"
+          "/home/runner/.nuget/NuGet/NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0"
@@ -37,7 +37,8 @@
           "enableAudit": "true",
           "auditLevel": "low",
           "auditMode": "direct"
-        }
+        },
+        "SdkAnalysisLevel": "10.0.100"
       },
       "frameworks": {
         "net8.0": {
@@ -91,7 +92,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.412/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.100/PortableRuntimeIdentifierGraph.json"
         }
       }
     }
